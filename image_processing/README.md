@@ -8,4 +8,13 @@ how to run:
 
 3. launch code:
 
-python python.py images [--win 7] [--roi x0 y0 x1 y1]
+put in x0 y0 x1 y1
+
+python python.py images --win 7 --roi x0 y0 x1 y1
+
+
+for rat images:
+
+python python.py images --win 7 --roi 0 0 820 976
+
+win7 looks best (atleast for rat)

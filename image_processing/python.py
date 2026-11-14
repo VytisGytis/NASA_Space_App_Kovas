@@ -4,8 +4,8 @@ Simple laser speckle contrast imaging (LSCI) pipeline.
 Usage:
     python lsci_pipeline.py frames_folder [--win 7] [--roi x0 y0 x1 y1]
 
-Put your captured frames (png/tif/jpg) in one folder, sorted by name.
-Requires: numpy scipy pillow matplotlib
+Put your captured frames (dng/png/tif/bmp/jpg) in one folder, sorted by name.
+Requires: numpy scipy pillow matplotlib rawpy
 """
 import argparse
 from pathlib import Path
@@ -16,20 +16,50 @@ from scipy.ndimage import uniform_filter
 import matplotlib.pyplot as plt
 
 
+def load_dng(path):
+    """
+    Read a DNG as RAW Bayer data (no demosaicing) and return one green
+    sample per 2x2 Bayer tile as a float array (H/2, W/2).
+
+    Demosaicing interpolates neighbouring pixels, which correlates them and
+    artificially lowers speckle contrast, so we avoid it on purpose.
+    """
+    import rawpy  # imported here so BMP/PNG users don't need it
+
+    with rawpy.imread(str(path)) as raw:
+        mosaic = raw.raw_image_visible.astype(np.float64)
+        colors = raw.raw_colors_visible          # 0=R, 1=G, 2=B, 3=G2
+        black = float(np.mean(raw.black_level_per_channel))
+
+    mosaic = np.clip(mosaic - black, 0, None)
+    h, w = (mosaic.shape[0] // 2) * 2, (mosaic.shape[1] // 2) * 2
+    mosaic, colors = mosaic[:h, :w], colors[:h, :w]
+
+    green = (colors == 1)                         # exactly one G per 2x2 tile
+    blocks = (mosaic * green).reshape(h // 2, 2, w // 2, 2)
+    return blocks.sum(axis=(1, 3))
+
+
+def load_image(path):
+    """Load one frame as a 2D float array."""
+    if path.suffix.lower() == ".dng":
+        return load_dng(path)
+    img = np.asarray(Image.open(path))
+    if img.ndim == 3:          # RGB -> keep green channel
+        img = img[..., 1]
+    return img.astype(np.float64)
+
+
 def load_frames(folder):
-    """Load all images in a folder as a (T, H, W) float array (green channel)."""
-    files = sorted(
-        p for p in Path(folder).iterdir()
-        if p.suffix.lower() in {".png", ".tif", ".tiff", ".jpg", ".jpeg"}
-    )
+    """Load all images in a folder as a (T, H, W) float array."""
+    exts = {".dng", ".png", ".tif", ".tiff", ".bmp", ".jpg", ".jpeg"}
+    files = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in exts)
     if not files:
         raise FileNotFoundError(f"No images found in {folder}")
-    frames = []
-    for f in files:
-        img = np.asarray(Image.open(f))
-        if img.ndim == 3:          # RGB -> keep green channel
-            img = img[..., 1]
-        frames.append(img.astype(np.float64))
+    frames = [load_image(f) for f in files]
+    shapes = {f.shape for f in frames}
+    if len(shapes) > 1:
+        raise ValueError(f"Frames have different sizes: {shapes}")
     return np.stack(frames)
 
 
