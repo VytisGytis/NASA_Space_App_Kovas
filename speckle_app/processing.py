@@ -51,6 +51,12 @@ def _raw_planes(path: Path) -> tuple[dict[str, np.ndarray], dict[str, float]]:
             raw = r.raw_image_visible
         except Exception:  # noqa: BLE001 - LibRaw has no mosaic for some DNG flavours
             raw = None
+        if r.num_colors == 1 and raw is not None and raw.ndim == 2:
+            # monochrome sensor / synthetic data: every pixel is a measurement
+            black = float(np.mean(r.black_level_per_channel))
+            s = float((raw >= float(r.white_level) * 0.98).mean())
+            mono = raw.astype(np.float64) - black
+            return {k: mono for k in "RGB"}, {k: s for k in "RGB"}
         if pat is None or raw is None or raw.ndim != 2 or pat.shape != (2, 2):
             return _linear_planes(r)
         desc = r.color_desc.decode()
@@ -76,6 +82,10 @@ def _linear_planes(r) -> tuple[dict[str, np.ndarray], dict[str, float]]:
     rgb = r.postprocess(gamma=(1, 1), no_auto_bright=True, output_bps=16,
                         use_camera_wb=False, use_auto_wb=False, user_wb=[1, 1, 1, 1],
                         output_color=rawpy.ColorSpace.raw, user_flip=0)
+    if rgb.ndim == 2:
+        rgb = rgb[..., None]
+    if rgb.shape[2] < 3:                 # single-channel output -> use it for R, G, B
+        rgb = np.repeat(rgb[..., :1], 3, axis=2)
     planes = {k: rgb[..., i].astype(np.float64) for i, k in enumerate("RGB")}
     sat = {k: float((rgb[..., i] >= 65535 * 0.98).mean()) for i, k in enumerate("RGB")}
     return planes, sat
