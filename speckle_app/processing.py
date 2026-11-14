@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from scipy.ndimage import binary_opening, uniform_filter
+from scipy.ndimage import binary_opening, gaussian_filter, uniform_filter
 
 try:
     import rawpy
@@ -36,6 +36,8 @@ class Frame:
 
 def list_frames(folder: Path) -> list[Path]:
     folder = Path(folder)
+    if folder.is_file():                      # a single image picked directly
+        return [folder] if folder.suffix.lower() in RAW_EXT | IMG_EXT else []
     return sorted(p for p in folder.iterdir()
                   if p.is_file() and p.suffix.lower() in RAW_EXT | IMG_EXT)
 
@@ -107,13 +109,16 @@ def _img_planes(path: Path) -> tuple[dict[str, np.ndarray], dict[str, float]]:
 def load_frame(path: Path, channel: str = "Auto", rotate: int = 0) -> Frame:
     path = Path(path)
     planes, sat = (_raw_planes if path.suffix.lower() in RAW_EXT else _img_planes)(path)
-    if channel == "Auto":                     # brightest channel = laser colour
-        channel = max("RGB", key=lambda k: planes[k].mean())
-    if channel == "Luma":
-        data = 0.299 * planes["R"] + 0.587 * planes["G"] + 0.114 * planes["B"]
-        s = max(sat.values())
+    if planes["R"] is planes["G"] is planes["B"]:   # monochrome source
+        channel, data, s = "Mono", planes["G"], sat["G"]
     else:
-        data, s = planes[channel], sat[channel]
+        if channel not in ("R", "G", "B", "Luma"):  # "Auto" (or "Mono" from another scan)
+            channel = max("RGB", key=lambda k: planes[k].mean())  # brightest = laser colour
+        if channel == "Luma":
+            data = 0.299 * planes["R"] + 0.587 * planes["G"] + 0.114 * planes["B"]
+            s = max(sat.values())
+        else:
+            data, s = planes[channel], sat[channel]
     data = np.clip(data, 0, None)
     if rotate % 360:
         data = np.ascontiguousarray(np.rot90(data, k=-(rotate // 90)))
@@ -226,6 +231,7 @@ class Comparison:
     n_b: int
     temporal_k: np.ndarray | None = None
     warnings: list[str] = field(default_factory=list)
+    single: bool = False          # single-image mode: k_b = local background K
 
     @property
     def flow_a(self):
@@ -299,6 +305,33 @@ def compare(frames_a: list[Frame], frames_b: list[Frame], s: Settings,
         len(frames_a), len(frames_b), tk, notes)
 
 
+def analyze_single(frame: Frame, s: Settings, label="image", progress=None) -> Comparison:
+    """Analyse ONE image, no reference needed.
+
+    Flow / motion blurs speckle, so moving regions have lower K than the still
+    tissue around them. K is lightly smoothed (one frame is noisy), then compared
+    with its local background (a wide moving average), so slow brightness or
+    focus changes across the image are not mistaken for flow. dk_rel = K / K_bg - 1:
+    negative = less contrast than the surroundings = likely flow.
+    """
+    step = progress or (lambda *_: None)
+    img = frame.data
+    step("Speckle contrast...", 0.3)
+    k, m = spatial_contrast(img, s.win)
+    step("Comparing with surroundings...", 0.6)
+    ks = gaussian_filter(k, sigma=0.6 * s.win)
+    h, w = img.shape
+    bg_win = max(41, int(0.15 * min(h, w)) | 1)
+    k_bg = uniform_filter(ks, bg_win)
+    dk = ks / (k_bg + 1e-9) - 1
+    level = max(s.min_signal * max(np.percentile(img, 99.5), 1.0), 2.0)
+    valid = m > level
+    step("Done", 1.0)
+    return Comparison(label, "single image", frame.channel, img, img, k, k_bg, dk,
+                      np.ones_like(k), valid, (0, 0), frame.saturated, frame.saturated,
+                      1, 0, single=True)
+
+
 @dataclass
 class Verdict:
     mask: np.ndarray
@@ -317,6 +350,16 @@ def evaluate(c: Comparison, method: str, k_thr: float, corr_thr: float,
     slider move. method: 'contrast' (|dK/K| > k_thr), 'correlation'
     (corr < corr_thr) or 'combined' (either)."""
     v = c.valid
+    if c.single:                              # flag only *lower* contrast than surroundings
+        mask = binary_opening(v & (c.dk_rel < -k_thr), iterations=2)
+        nvalid = max(int(v.sum()), 1)
+        pct = 100.0 * mask.sum() / nvalid
+        rest = v & ~mask
+        k_static = float(c.k_a[rest].mean()) if rest.any() else float("nan")
+        k_flow = float(c.k_a[mask].mean()) if mask.any() else float("nan")
+        dk_pct = 100.0 * float(c.dk_rel[mask].mean()) if mask.any() else 0.0
+        return Verdict(mask, pct, pct > min_area_pct, k_static, k_flow, dk_pct,
+                       float("nan"), 100.0 * v.mean())
     by_k = np.abs(c.dk_rel) > k_thr
     by_c = c.corr < corr_thr
     if method == "correlation":

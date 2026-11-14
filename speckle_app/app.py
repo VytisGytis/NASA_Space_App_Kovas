@@ -49,6 +49,10 @@ BAD = "#ff5c7a"
 
 VIEWS = ["Overlay", "Reference", "Compare", "K ref", "K cmp", "ΔK/K",
          "Correlation", "Flow ratio", "Temporal K"]
+SINGLE_VIEWS = ["Overlay", "Image", "K map", "Surroundings K", "ΔK/K", "Flow"]
+VIEW_ALIAS = {"Image": "Reference", "K map": "K ref", "Surroundings K": "K cmp",
+              "Flow": "Flow ratio"}
+MODES = ["Single image", "Compare scans"]
 METHODS = {"Combined": "combined", "Contrast": "contrast", "Correlation": "correlation"}
 MAX_DISPLAY_PX = 1400
 
@@ -57,7 +61,7 @@ def load_settings() -> dict:
     s = {"incoming": str(ROOT / "incoming"), "capture": dict(CAPTURE_DEFAULTS),
          "analysis": {"channel": "Auto", "rotate": 0, "win": 7, "align": True,
                       "method": "Combined", "k_thr": 20, "corr_thr": 0.5,
-                      "min_area": 1.0, "auto": True}}
+                      "min_area": 1.0, "auto": True, "mode": "Single image"}}
     try:
         saved = json.loads(SETTINGS_FILE.read_text())
         s["incoming"] = saved.get("incoming", s["incoming"])
@@ -77,21 +81,24 @@ class StatCard(ctk.CTkFrame):
     def __init__(self, master, title):
         super().__init__(master, fg_color=CARD, corner_radius=12,
                          border_width=1, border_color=BORDER)
-        ctk.CTkLabel(self, text=title.upper(), font=font(10, "bold"),
-                     text_color=MUTED).pack(anchor="w", padx=14, pady=(10, 0))
+        self.title = ctk.CTkLabel(self, text=title.upper(), font=font(10, "bold"),
+                                  text_color=MUTED)
+        self.title.pack(anchor="w", padx=14, pady=(10, 0))
         self.value = ctk.CTkLabel(self, text="—", font=font(22, "bold"), text_color=TEXT)
         self.value.pack(anchor="w", padx=14)
         self.sub = ctk.CTkLabel(self, text=" ", font=font(11), text_color=MUTED)
         self.sub.pack(anchor="w", padx=14, pady=(0, 10))
 
-    def set(self, value, sub=" ", color=TEXT):
+    def set(self, value, sub=" ", color=TEXT, title=None):
+        if title:
+            self.title.configure(text=title.upper())
         self.value.configure(text=value, text_color=color)
         self.sub.configure(text=sub)
 
 
 class ScanRow(ctk.CTkFrame):
     def __init__(self, master, app, path: Path, n: int, complete: bool, external: bool):
-        is_ref, is_cmp = path == app.ref, path == app.cmp
+        is_ref, is_cmp = path == app.ref, path == app.cmp and not app.single
         border = ACCENT if is_ref else CMP_COLOR if is_cmp else BORDER
         super().__init__(master, fg_color=CARD_HI if (is_ref or is_cmp) else CARD,
                          corner_radius=10, border_width=1, border_color=border)
@@ -102,17 +109,21 @@ class ScanRow(ctk.CTkFrame):
         when = time.strftime("%H:%M", time.localtime(path.stat().st_mtime))
         badge, color = ("✓ done", OK) if complete else ("⚠ partial", WARN)
         if external:
-            badge, color = "folder", MUTED
+            badge, color = ("image", MUTED) if path.is_file() else ("folder", MUTED)
         info = ctk.CTkFrame(self, fg_color="transparent")
         info.grid(row=1, column=0, sticky="w", padx=(12, 4), pady=(0, 8))
-        ctk.CTkLabel(info, text=f"{n} frame{'s' * (n != 1)} · {when}  ",
+        single = app.single
+        count = "1 image" if path.is_file() else f"{n} frame{'s' * (n != 1)}"
+        ctk.CTkLabel(info, text=f"{count} · {when}  ",
                      font=font(11), text_color=MUTED).pack(side="left")
         ctk.CTkLabel(info, text=badge, font=font(11), text_color=color).pack(side="left")
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=0, column=1, rowspan=2, padx=(0, 8))
-        for text, on, col, hov, role in (("REF", is_ref, ACCENT, ACCENT_HOVER, "ref"),
-                                         ("CMP", is_cmp, CMP_COLOR, "#e08a35", "cmp")):
+        roles = [("USE" if single else "REF", is_ref, ACCENT, ACCENT_HOVER, "ref")]
+        if not single:
+            roles.append(("CMP", is_cmp, CMP_COLOR, "#e08a35", "cmp"))
+        for text, on, col, hov, role in roles:
             ctk.CTkButton(btns, text=text, width=46, height=26, corner_radius=8,
                           font=font(11, "bold"),
                           fg_color=col if on else "transparent", hover_color=hov,
@@ -155,10 +166,9 @@ class App(ctk.CTk):
         self._build_sidebar()
         self._build_main()
 
-        self.refresh_scans()
         self.known = set(self._scan_dirs())
         self.waiting: set[Path] = set()
-        self._render_placeholder("Pick a REF scan (and optionally a CMP scan), then press Analyze")
+        self.set_mode(self.mode_var.get())
 
         self.bind("<Return>", lambda e: self.analyze())
         self.bind("<F5>", lambda e: self.refresh_scans())
@@ -213,8 +223,15 @@ class App(ctk.CTk):
                       command=self.open_settings).pack(side="left", fill="x",
                                                        expand=True, padx=(8, 0))
 
+        # ---- mode
+        self._section(sb, "MODE")
+        self.mode_var = ctk.StringVar(value=a["mode"] if a["mode"] in MODES else MODES[0])
+        ctk.CTkSegmentedButton(sb, values=MODES, variable=self.mode_var, height=32,
+                               selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+                               command=self.set_mode).pack(fill="x", padx=18)
+
         # ---- scans
-        self._section(sb, "SCANS")
+        self._section(sb, "IMAGES & SCANS")
         self.scan_list = ctk.CTkScrollableFrame(sb, height=190, fg_color=BG, corner_radius=12,
                                                 scrollbar_button_color=BORDER)
         self.scan_list.pack(fill="x", padx=18)
@@ -222,18 +239,19 @@ class App(ctk.CTk):
         row.pack(fill="x", padx=18, pady=(8, 0))
         ctk.CTkButton(row, text="Refresh", height=30, fg_color=CARD_HI, hover_color=BORDER,
                       command=self.refresh_scans).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row, text="Open image…", height=30, fg_color=CARD_HI,
+                      hover_color=BORDER, command=self.open_image).pack(
+            side="left", fill="x", expand=True, padx=(8, 0))
         ctk.CTkButton(row, text="Open folder…", height=30, fg_color=CARD_HI,
                       hover_color=BORDER, command=self.open_folder).pack(
             side="left", fill="x", expand=True, padx=(8, 0))
-        ctk.CTkButton(row, text="Clear CMP", height=30, fg_color=CARD_HI,
-                      hover_color=BORDER, command=lambda: self.pick(None, "cmp")).pack(
-            side="left", fill="x", expand=True, padx=(8, 0))
-        ctk.CTkLabel(sb, text="No CMP picked → frame 1 of REF is compared\nwith its "
-                              "other frames.", font=font(11), text_color=MUTED,
-                     justify="left").pack(anchor="w", padx=20, pady=(6, 0))
+        self.hint_lbl = ctk.CTkLabel(sb, text="", font=font(11), text_color=MUTED,
+                                     justify="left")
+        self.hint_lbl.pack(anchor="w", padx=20, pady=(6, 0))
         self.auto_var = ctk.BooleanVar(value=a["auto"])
-        ctk.CTkSwitch(sb, text="Auto-compare new scans with REF", variable=self.auto_var,
-                      progress_color=ACCENT, font=font(12)).pack(anchor="w", padx=18, pady=(10, 0))
+        self.auto_sw = ctk.CTkSwitch(sb, text="", variable=self.auto_var,
+                                     progress_color=ACCENT, font=font(12))
+        self.auto_sw.pack(anchor="w", padx=18, pady=(10, 0))
 
         # ---- analysis
         self._section(sb, "ANALYSIS")
@@ -253,7 +271,7 @@ class App(ctk.CTk):
                                ).grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=3)
 
         self.win_var = ctk.IntVar(value=a["win"])
-        self.win_label = self._slider(sb, "Window", 3, 21, 9, self.win_var,
+        self._slider(sb, "Window", 3, 21, 9, self.win_var,
                                       lambda v: f"{int(v)}×{int(v)} px", self._on_win)
         self.align_var = ctk.BooleanVar(value=a["align"])
         ctk.CTkCheckBox(sb, text="Auto-align scans (phase correlation)",
@@ -267,11 +285,12 @@ class App(ctk.CTk):
         # ---- detection (live)
         self._section(sb, "DETECTION  ·  live")
         self.method_var = ctk.StringVar(value=a["method"])
-        ctk.CTkSegmentedButton(sb, values=list(METHODS), variable=self.method_var,
-                               selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
-                               command=lambda _: self.schedule_eval()).pack(fill="x", padx=18)
+        self.method_btn = ctk.CTkSegmentedButton(
+            sb, values=list(METHODS), variable=self.method_var, selected_color=ACCENT,
+            selected_hover_color=ACCENT_HOVER, command=lambda _: self.schedule_eval())
+        self.method_btn.pack(fill="x", padx=18)
         self.kthr_var = ctk.DoubleVar(value=a["k_thr"])
-        self._slider(sb, "Contrast change", 5, 100, 95, self.kthr_var,
+        self.kthr_title = self._slider(sb, "Contrast change", 5, 100, 95, self.kthr_var,
                      lambda v: f"> {v:.0f} %", lambda _: self.schedule_eval())
         self.cthr_var = ctk.DoubleVar(value=a["corr_thr"])
         self._slider(sb, "Correlation below", 0.1, 0.95, 85, self.cthr_var,
@@ -286,7 +305,8 @@ class App(ctk.CTk):
         box.pack(fill="x", padx=18, pady=(10, 0))
         top = ctk.CTkFrame(box, fg_color="transparent")
         top.pack(fill="x")
-        ctk.CTkLabel(top, text=title, font=font(12)).pack(side="left")
+        name = ctk.CTkLabel(top, text=title, font=font(12))
+        name.pack(side="left")
         val = ctk.CTkLabel(top, text=fmt(var.get()), font=font(12, "bold"), text_color=ACCENT)
         val.pack(side="right")
 
@@ -296,7 +316,7 @@ class App(ctk.CTk):
         ctk.CTkSlider(box, from_=lo, to=hi, number_of_steps=steps, variable=var,
                       progress_color=ACCENT, button_color=ACCENT,
                       button_hover_color=ACCENT_HOVER, command=changed).pack(fill="x", pady=(2, 0))
-        return val
+        return name
 
     def _on_win(self, v):
         v = int(round(v))
@@ -461,7 +481,7 @@ class App(ctk.CTk):
         for w in self.scan_list.winfo_children():
             w.destroy()
         dirs = sorted(self._scan_dirs(), key=lambda d: d.stat().st_mtime, reverse=True)
-        items = [(d, False) for d in dirs] + [(d, True) for d in self.extra_dirs if d.is_dir()]
+        items = [(d, False) for d in dirs] + [(d, True) for d in self.extra_dirs if d.exists()]
         if not items:
             ctk.CTkLabel(self.scan_list, text=f"No scans in\n{self.settings['incoming']}",
                          text_color=MUTED, font=font(12)).pack(pady=20)
@@ -472,8 +492,47 @@ class App(ctk.CTk):
                 continue
             ScanRow(self.scan_list, self, d, n, (d / "done.txt").exists(), ext).pack(
                 fill="x", pady=3, padx=2)
-        self.ref_lbl.configure(text=f"REF  {self.ref.name if self.ref else '—'}")
-        self.cmp_lbl.configure(text=f"CMP  {self.cmp.name if self.cmp else 'frames within REF'}")
+        self._pair_labels()
+
+    @property
+    def single(self) -> bool:
+        return self.mode_var.get() == MODES[0]
+
+    def _pair_labels(self, c=None):
+        if self.single:
+            self.ref_lbl.configure(text=f"IMAGE  {c.label_a if c else (self.ref.name if self.ref else '—')}")
+            self.cmp_lbl.configure(text="no reference needed")
+        else:
+            self.ref_lbl.configure(text=f"REF  {c.label_a if c else (self.ref.name if self.ref else '—')}")
+            self.cmp_lbl.configure(text=f"CMP  {c.label_b if c else (self.cmp.name if self.cmp else 'frames within REF')}")
+
+    def set_mode(self, mode):
+        single = mode == MODES[0]
+        self.view_btn.configure(values=SINGLE_VIEWS if single else VIEWS)
+        self.view = "Overlay"
+        self.view_btn.set(self.view)
+        self.method_btn.configure(state="disabled" if single else "normal")
+        self.kthr_title.configure(text="K below surroundings" if single else "Contrast change")
+        self.hint_lbl.configure(text=(
+            "Press USE on one image or scan. For a folder,\nonly its first frame is analysed."
+            if single else "No CMP picked → frame 1 of REF is compared\nwith its other frames."))
+        self.auto_sw.configure(text="Auto-analyse every new scan" if single
+                               else "Auto-compare new scans with REF")
+        self.comp = self.verdict = None
+        self.ax = None
+        self.roi = None
+        self._lims = None
+        self.stripe.configure(fg_color=BORDER)
+        self.verdict_lbl.configure(text="NO ANALYSIS YET", text_color=MUTED)
+        self.verdict_sub.configure(text="Pick an image on the left and press Analyze" if single
+                                   else "Pick REF (and optionally CMP) scans and press Analyze")
+        for card in self.cards.values():
+            card.set("—")
+        self.refresh_scans()
+        self._update_roi_label()
+        self._render_placeholder(
+            "Pick ONE image (USE), then press Analyze" if single
+            else "Pick a REF scan (and optionally a CMP scan), then press Analyze")
 
     def pick(self, path, role):
         if role == "ref":
@@ -485,6 +544,20 @@ class App(ctk.CTk):
             if self.cmp == self.ref:
                 self.ref = None
         self.refresh_scans()
+
+    def open_image(self):
+        f = filedialog.askopenfilename(
+            title="One speckle image",
+            filetypes=[("Speckle images", "*.dng *.DNG *.png *.tif *.tiff *.jpg *.jpeg *.bmp"),
+                       ("All files", "*")])
+        if f:
+            p = Path(f)
+            if p not in self.extra_dirs:
+                self.extra_dirs.append(p)
+            self.ref = p
+            if self.cmp == p:
+                self.cmp = None
+            self.refresh_scans()
 
     def open_folder(self):
         d = filedialog.askdirectory(title="Folder with speckle frames (DNG/PNG/TIFF/JPG)")
@@ -516,6 +589,12 @@ class App(ctk.CTk):
 
     def _auto_compare(self, d: Path):
         if not self.auto_var.get():
+            return
+        if self.single:
+            if not self.busy:
+                self.ref = d
+                self.refresh_scans()
+                self.analyze()
             return
         if self.ref is None:
             self.ref = d
@@ -606,10 +685,11 @@ class App(ctk.CTk):
         if self.busy:
             return
         if not self.ref:
-            self.set_status("Pick a reference scan first (REF button)", "warn")
+            self.set_status("Pick an image first (USE button / Open image…)" if self.single
+                            else "Pick a reference scan first (REF button)", "warn")
             return
         s = self._analysis_settings()
-        ref, cmp = self.ref, self.cmp
+        ref, cmp, single = self.ref, self.cmp, self.single
 
         def work():
             warns: list[str] = []
@@ -620,7 +700,11 @@ class App(ctk.CTk):
             fa = self._load(ref, s.channel, s.rotate, warns)
             if not fa:
                 raise ValueError(f"No readable frames in {ref.name}. {self._why(warns)}")
-            if cmp:
+            if single:
+                label = ref.name if ref.is_file() or len(fa) == 1 else \
+                    f"{ref.name} · frame 1 of {len(fa)}"
+                c = P.analyze_single(fa[0], s, label, prog)
+            elif cmp:
                 prog(f"Loading {cmp.name}...", 0.15)
                 fb = self._load(cmp, fa[0].channel, s.rotate, warns)
                 if not fb:
@@ -642,11 +726,11 @@ class App(ctk.CTk):
             self.roi = None
             self._lims = None
             self.ax = None
-        self.ref_lbl.configure(text=f"REF  {c.label_a}")
-        self.cmp_lbl.configure(text=f"CMP  {c.label_b}")
+        self._pair_labels(c)
         self.evaluate(render=False)
         self.render()
-        msg = (f"Analyzed {c.n_a}+{c.n_b} frames · channel {c.channel} · "
+        what = "1 image" if c.single else f"{c.n_a}+{c.n_b} frames"
+        msg = (f"Analyzed {what} · channel {c.channel} · "
                f"{c.k_a.shape[1]}×{c.k_a.shape[0]} px")
         if c.shift != (0, 0):
             msg += f" · aligned by dx={c.shift[1]}, dy={c.shift[0]} px"
@@ -669,6 +753,12 @@ class App(ctk.CTk):
                        self.cthr_var.get(), self.area_var.get())
         self.verdict = v
         color = BAD if v.changed else OK
+        if c.single:
+            self._show_single_verdict(c, v, color)
+            if render and self.view == "Overlay":
+                self.render()
+            self._update_roi_label()
+            return
         self.stripe.configure(fg_color=color)
         self.verdict_lbl.configure(text="CHANGE DETECTED" if v.changed else "NO SIGNIFICANT CHANGE",
                                    text_color=color)
@@ -676,19 +766,45 @@ class App(ctk.CTk):
             text=f"{v.changed_pct:.1f}% of the lit area changed (alarm above "
                  f"{self.area_var.get():.1f}%) · {self.method_var.get().lower()} method · "
                  f"{v.valid_pct:.0f}% of the image has enough laser light")
-        self.cards["k"].set(f"{v.mean_k_a:.3f} → {v.mean_k_b:.3f}", "mean over lit area")
+        self.cards["k"].set(f"{v.mean_k_a:.3f} → {v.mean_k_b:.3f}", "mean over lit area",
+                            title="Speckle contrast K")
         self.cards["dk"].set(f"{v.dk_pct:+.1f} %",
                              "lower K = more motion" if v.dk_pct < 0 else "higher K = less motion",
-                             BAD if abs(v.dk_pct) > self.kthr_var.get() else TEXT)
-        self.cards["area"].set(f"{v.changed_pct:.1f} %", "of lit pixels", color)
+                             BAD if abs(v.dk_pct) > self.kthr_var.get() else TEXT, title="ΔK")
+        self.cards["area"].set(f"{v.changed_pct:.1f} %", "of lit pixels", color,
+                               title="Changed area")
         self.cards["corr"].set(f"{v.mean_corr:.2f}", "1 = identical pattern",
-                               WARN if v.mean_corr < self.cthr_var.get() else TEXT)
+                               WARN if v.mean_corr < self.cthr_var.get() else TEXT,
+                               title="Correlation")
         sat = max(c.sat_a, c.sat_b) * 100
         self.cards["sat"].set(f"{sat:.2f} %", "ref {:.2f} · cmp {:.2f}".format(
             c.sat_a * 100, c.sat_b * 100), WARN if sat > 0.5 else TEXT)
         if render and self.view == "Overlay":
             self.render()
         self._update_roi_label()
+
+    def _show_single_verdict(self, c, v, color):
+        thr = self.kthr_var.get()
+        self.stripe.configure(fg_color=color)
+        self.verdict_lbl.configure(text="FLOW DETECTED" if v.changed else "NO FLOW REGIONS",
+                                   text_color=color)
+        self.verdict_sub.configure(
+            text=f"{v.changed_pct:.1f}% of the lit area has speckle contrast ≥ {thr:.0f}% below "
+                 f"its surroundings (alarm above {self.area_var.get():.1f}%) · "
+                 f"{v.valid_pct:.0f}% of the image has enough laser light")
+        flagged = v.changed_pct > 0 and np.isfinite(v.mean_k_b)
+        self.cards["k"].set(f"{v.mean_k_a:.3f}", "mean K of still areas", title="Still areas K")
+        self.cards["dk"].set(f"{v.mean_k_b:.3f}" if flagged else "—",
+                             f"{v.dk_pct:+.0f}% vs surroundings" if flagged else "nothing flagged",
+                             BAD if flagged else TEXT, title="Flow areas K")
+        self.cards["area"].set(f"{v.changed_pct:.1f} %", "of lit pixels", color,
+                               title="Flow area")
+        flow = (v.mean_k_a / v.mean_k_b) ** 2 if flagged else float("nan")
+        self.cards["corr"].set(f"×{flow:.1f}" if flagged else "—",
+                               "flow index 1/K² vs still", title="Relative flow")
+        sat = c.sat_a * 100
+        self.cards["sat"].set(f"{sat:.2f} %", "pixels at sensor maximum",
+                              WARN if sat > 0.5 else TEXT, title="Saturation")
 
     # ============================================================ rendering
     def set_view(self, v):
@@ -699,7 +815,9 @@ class App(ctk.CTk):
         return max(1, int(np.ceil(max(a.shape) / MAX_DISPLAY_PX)))
 
     def _view_data(self):
-        c, v = self.comp, self.view
+        c, v = self.comp, VIEW_ALIAS.get(self.view, self.view)
+        if c.single:
+            return self._single_view_data(c, v)
         st = self._stride(c.k_a)
         ds = lambda a: a[::st, ::st]  # noqa: E731
         valid = ds(c.valid)
@@ -750,6 +868,43 @@ class App(ctk.CTk):
                         title="Relative flow index 1/K² (cmp ÷ ref)",
                         cbar="log₂ ratio  (+1 = 2× more flow)")
         return dict(msg="?")
+
+    def _single_view_data(self, c, v):
+        st = self._stride(c.k_a)
+        ds = lambda a: a[::st, ::st]  # noqa: E731
+        valid = ds(c.valid)
+        nan = lambda a: np.where(valid, a, np.nan)  # noqa: E731
+        bright = max(np.percentile(ds(c.intensity_a), 99.5), 1.0)
+        gray = np.clip(np.sqrt(np.clip(ds(c.intensity_a), 0, None) / bright), 0, 1)
+        if v == "Overlay":
+            base = np.where(valid, gray, gray * 0.45)
+            rgb = np.repeat(base[..., None], 3, axis=2)
+            if self.verdict is not None:
+                m = ds(self.verdict.mask)
+                rgb[m] = rgb[m] * 0.35 + np.array([1.0, 0.3, 0.42]) * 0.65
+            return dict(img=rgb, title=f"Likely flow / motion (red) · {c.label_a}")
+        if v == "Reference":
+            return dict(img=gray, cmap="gray", vmin=0, vmax=1, title=f"Image · {c.label_a}",
+                        cbar="√ intensity (normalised)")
+        if v in ("K ref", "K cmp"):
+            vals = ds(c.k_a)[valid]
+            hi = max(float(np.percentile(vals, 99.5)) if vals.size else 1.0, 0.05)
+            a = c.k_a if v == "K ref" else c.k_b
+            t = ("Speckle contrast K (dark = flow / motion)" if v == "K ref"
+                 else "Local surroundings K (what each pixel is compared with)")
+            return dict(img=nan(ds(a)), cmap="viridis", vmin=0, vmax=hi, title=t, cbar="K")
+        if v == "ΔK/K":
+            d = ds(c.dk_rel) * 100
+            lim = min(max(2 * self.kthr_var.get(), 20), 100)
+            return dict(img=nan(d), cmap="RdBu_r", vmin=-lim, vmax=lim,
+                        title="Speckle contrast relative to surroundings (blue = lower)",
+                        cbar="K / K_surroundings − 1  [%]")
+        if v == "Flow ratio":
+            r = -2 * np.log2(np.clip(1 + ds(c.dk_rel), 1e-3, None))
+            return dict(img=nan(r), cmap="inferno", vmin=0, vmax=1.5,
+                        title="Relative flow index vs surroundings (bright = more flow)",
+                        cbar="log₂ (1/K²  ÷  surroundings)")
+        return dict(msg="Not used in single-image mode")
 
     def _style_ax(self, ax):
         ax.set_facecolor(CARD)
@@ -896,6 +1051,11 @@ class App(ctk.CTk):
         if not s:
             self.roi_lbl.configure(text=f"ROI {x1 - x0}×{y1 - y0} px: not enough laser light")
             return
+        if self.comp.single:
+            self.roi_lbl.configure(
+                text=f"ROI {x1 - x0}×{y1 - y0} px  ·  K {s['K_ref']:.3f}  ·  surroundings "
+                     f"{s['K_cmp']:.3f} ({-s['dK_pct'] / (1 + s['dK_pct'] / 100):+.1f}%)")
+            return
         self.roi_lbl.configure(
             text=f"ROI {x1 - x0}×{y1 - y0} px  ·  K {s['K_ref']:.3f} → {s['K_cmp']:.3f} "
                  f"({s['dK_pct']:+.1f}%)  ·  corr {s['corr']:.2f}  ·  "
@@ -909,16 +1069,22 @@ class App(ctk.CTk):
             return
         stamp = time.strftime("%Y%m%d_%H%M%S")
         safe = lambda s: "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in s)  # noqa
-        out = ROOT / "results" / f"{safe(c.label_a)}_vs_{safe(c.label_b)}_{stamp}"
+        tag = f"{safe(c.label_a)}_single" if c.single else f"{safe(c.label_a)}_vs_{safe(c.label_b)}"
+        out = ROOT / "results" / f"{tag}_{stamp}"
         prev_view = self.view
         views = []
-        for name in ("Overlay", "Reference", "Compare", "K ref", "ΔK/K", "Correlation"):
+        names = (("Overlay", "Image", "K map", "Surroundings K", "ΔK/K", "Flow") if c.single
+                 else ("Overlay", "Reference", "Compare", "K ref", "ΔK/K", "Correlation"))
+        for name in names:
             self.view = name
             views.append((name, self._view_data()))
         self.view = prev_view
         summary = {
-            "reference": c.label_a, "compare": c.label_b, "channel": c.channel,
-            "verdict": "CHANGE DETECTED" if v.changed else "NO SIGNIFICANT CHANGE",
+            "mode": "single image" if c.single else "compare",
+            "reference": c.label_a, "compare": None if c.single else c.label_b,
+            "channel": c.channel,
+            "verdict": ("FLOW DETECTED" if v.changed else "NO FLOW REGIONS") if c.single
+            else ("CHANGE DETECTED" if v.changed else "NO SIGNIFICANT CHANGE"),
             "changed_area_pct": round(v.changed_pct, 3),
             "mean_K_ref": v.mean_k_a, "mean_K_cmp": v.mean_k_b,
             "dK_pct": round(v.dk_pct, 3), "mean_correlation": v.mean_corr,
@@ -943,7 +1109,8 @@ class App(ctk.CTk):
             out.mkdir(parents=True, exist_ok=True)
             (out / "summary.json").write_text(json.dumps(summary, indent=2))
             fig = Figure(figsize=(16, 9.5), facecolor="white", layout="constrained")
-            fig.suptitle(f"{summary['verdict']} - {c.label_a} vs {c.label_b} · "
+            fig.suptitle(f"{summary['verdict']} - {c.label_a}"
+                         f"{'' if c.single else ' vs ' + c.label_b} · "
                          f"{v.changed_pct:.1f}% changed", fontsize=14)
             for i, (name, d) in enumerate(views):
                 ax = fig.add_subplot(2, 3, i + 1)
@@ -973,7 +1140,7 @@ class App(ctk.CTk):
             win=int(self.win_var.get()) | 1, align=self.align_var.get(),
             method=self.method_var.get(), k_thr=self.kthr_var.get(),
             corr_thr=self.cthr_var.get(), min_area=self.area_var.get(),
-            auto=self.auto_var.get())
+            auto=self.auto_var.get(), mode=self.mode_var.get())
         save_settings(self.settings)
         self.destroy()
 
