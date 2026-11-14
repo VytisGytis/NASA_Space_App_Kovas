@@ -1,1 +1,85 @@
-using an android camera to transfer image to pc/laptop for image processing
+ARCHITECTURE: LASER SPECKLE SCAN PIPELINE
+
+COMPONENTS
+  Laptop      Python app (scan.py), hosts the Wi-Fi hotspot (2.4 GHz)
+  ESP32       Laser controller, HTTP server on the hotspot (/on, /off)
+  Phone       Open Camera (RAW/DNG, manual ISO + exposure, foreground)
+  Link        Wireless ADB over the same hotspot
+  Output      Shared folder: incoming/scan_<timestamp>/*.dng
+
+FLOW
+
+  [SCAN button on laptop]
+            |
+            v
+  1. PRE-CHECK
+     - adb devices: phone connected? (auto-reconnect if not)
+     - ESP32 reachable? (HTTP request to /on, fail early if not)
+     - snapshot list of DNGs already on the phone (BEFORE)
+            |
+            v
+  2. LASER ON
+     - GET http://<esp>/on
+     - wait ~0.5 s for the laser output to stabilize
+            |
+            v
+  3. CAPTURE
+     - one adb shell command sent to the phone:
+         keyevent (shutter) -> sleep 0.5 -> keyevent -> sleep 0.5 -> keyevent
+       (timing runs on the phone, so network latency doesn't add jitter)
+     - wait ~0.5 s for the last exposure to finish
+            |
+            v
+  4. LASER OFF  (always, even if step 3 failed)
+     - GET http://<esp>/off
+     - ESP32 also turns off by itself after 10 s or if Wi-Fi drops
+            |
+            v
+  5. COLLECT
+     - poll phone until the NEW DNGs (current list minus BEFORE) number N
+       (timeout ~15 s)
+     - wait for file sizes to stop changing (file fully written)
+            |
+            v
+  6. TRANSFER
+     - create incoming/scan_<HHMMSS>/
+     - adb pull each new DNG into that folder
+     - verify: local size == remote size
+            |
+            v
+  7. FLUSH PHONE
+     - only for files that pulled and verified OK:
+         adb shell rm <file>
+     - failed files stay on the phone for a retry
+            |
+            v
+  8. DONE
+     - status shown in the GUI: "3 photos -> incoming/scan_142530"
+     - team's processing reads from incoming/ (newest scan_* folder)
+
+FAILURE HANDLING
+  - Laser: three layers of protection (finally block in Python,
+    10 s ESP32 timeout, off on Wi-Fi loss)
+  - Fewer files than expected: report it, keep what arrived
+  - Pull fails: no delete on the phone, user can press retry
+  - ADB drops: reconnect to the saved IP:port before each scan
+
+FOLDER CONTRACT (for the processing team)
+  incoming/
+    scan_142530/
+      IMG_..._1.dng
+      IMG_..._2.dng
+      IMG_..._3.dng
+    scan_142612/
+      ...
+  - One folder per scan, files in capture order (sorted by name)
+  - Processing only ever reads, never writes into incoming/
+  - Optional: write a tiny "done.txt" marker when the pull has finished,
+    so processing can poll for it and never opens a half-copied scan
+
+BEFORE THE DEMO CHECKLIST
+  - Hotspot on, 2.4 GHz; ESP32 IP fixed
+  - Phone on the hotspot, wireless debugging connected
+  - Open Camera in foreground, screen awake, RAW on, manual focus/ISO/exposure
+  - Volume keys set to "Take photo"
+  - Test scan on white paper: all 3 files arrive, intensity not saturated
