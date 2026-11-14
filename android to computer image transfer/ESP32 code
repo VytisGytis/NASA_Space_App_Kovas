@@ -1,0 +1,56 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* SSID = "your-hotspot-name";
+const char* PASS = "your-hotspot-password";
+
+const int laserPin = 4;                    // D4 = GPIO 4
+const unsigned long MAX_ON_MS = 10000;     // failsafe: auto-off after 10 s
+
+WebServer server(80);
+bool laserOn = false;
+unsigned long onSince = 0;
+
+void setLaser(bool on) {
+  digitalWrite(laserPin, on ? HIGH : LOW);
+  laserOn = on;
+  if (on) onSince = millis();
+  Serial.println(on ? "Laser ON" : "Laser OFF");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(laserPin, OUTPUT);
+  digitalWrite(laserPin, LOW);             // start with laser off
+  Serial.println("Laser server started");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(SSID, PASS);
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Connected. IP: ");
+  Serial.println(WiFi.localIP());          // use this IP in Python
+
+  server.on("/on",  []() { setLaser(true);  server.send(200, "text/plain", "on"); });
+  server.on("/off", []() { setLaser(false); server.send(200, "text/plain", "off"); });
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  // failsafe: turn the laser off if it has been on too long
+  if (laserOn && millis() - onSince > MAX_ON_MS) {
+    setLaser(false);
+  }
+
+  // failsafe: turn the laser off if Wi-Fi drops
+  if (laserOn && WiFi.status() != WL_CONNECTED) {
+    setLaser(false);
+    WiFi.reconnect();
+  }
+}

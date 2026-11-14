@@ -1,0 +1,8 @@
+customtkinter>=5.2
+numpy
+scipy
+pillow
+matplotlib
+rawpy        # reads the Open Camera DNG files
+requests     # ESP32 laser control
+pyserial     # ESP32 IP auto-detect over USB
