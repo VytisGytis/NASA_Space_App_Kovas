@@ -21,7 +21,7 @@ import tkinter as tk
 import requests
 
 # ---------------- CONFIG ----------------
-ADB = "adb"                          # or full path, e.g. r"C:\platform-tools\adb.exe"
+ADB = r"C:\platform-tools\adb.exe"                          # or full path, e.g. r"C:\platform-tools\adb.exe"
 PHONE = ""                           # "ip:port" from Wireless debugging, or "" to skip auto-connect
 REMOTE = "/sdcard/DCIM/OpenCamera"   # Open Camera save folder
 LOCAL = "incoming"                   # folder your team reads from
