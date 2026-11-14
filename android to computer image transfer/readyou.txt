@@ -1,0 +1,1 @@
+using an android camera to transfer image to pc/laptop for image processing
