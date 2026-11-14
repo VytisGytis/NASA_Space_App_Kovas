@@ -46,8 +46,13 @@ def _raw_planes(path: Path) -> tuple[dict[str, np.ndarray], dict[str, float]]:
     if rawpy is None:
         raise RuntimeError("rawpy is not installed - cannot read DNG files")
     with rawpy.imread(str(path)) as r:
-        raw = r.raw_image_visible
         pat = r.raw_pattern
+        try:
+            raw = r.raw_image_visible
+        except Exception:  # noqa: BLE001 - LibRaw has no mosaic for some DNG flavours
+            raw = None
+        if pat is None or raw is None or raw.ndim != 2 or pat.shape != (2, 2):
+            return _linear_planes(r)
         desc = r.color_desc.decode()
         black = r.black_level_per_channel
         white = float(r.white_level)
@@ -62,6 +67,18 @@ def _raw_planes(path: Path) -> tuple[dict[str, np.ndarray], dict[str, float]]:
                 sat[letter] = float((p >= white * 0.98).mean())
                 planes[letter] = p.astype(np.float64) - float(black[idx])
         return planes, sat
+
+
+def _linear_planes(r) -> tuple[dict[str, np.ndarray], dict[str, float]]:
+    """'Linear' DNGs (already demosaiced, e.g. Samsung Expert RAW, some Pixel
+    modes) have no Bayer mosaic. Decode them to linear 16-bit RGB with no white
+    balance, brightening or gamma, so intensities stay proportional to light."""
+    rgb = r.postprocess(gamma=(1, 1), no_auto_bright=True, output_bps=16,
+                        use_camera_wb=False, use_auto_wb=False, user_wb=[1, 1, 1, 1],
+                        output_color=rawpy.ColorSpace.raw, user_flip=0)
+    planes = {k: rgb[..., i].astype(np.float64) for i, k in enumerate("RGB")}
+    sat = {k: float((rgb[..., i] >= 65535 * 0.98).mean()) for i, k in enumerate("RGB")}
+    return planes, sat
 
 
 def _img_planes(path: Path) -> tuple[dict[str, np.ndarray], dict[str, float]]:

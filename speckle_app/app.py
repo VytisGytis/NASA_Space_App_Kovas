@@ -594,6 +594,14 @@ class App(ctk.CTk):
                 self.cache.popitem(last=False)
         return frames
 
+    @staticmethod
+    def _why(warns):
+        """Summarise why frames failed: the first reason plus how many failed."""
+        if not warns:
+            return "The folder has no .dng/.png/.tif/.jpg files"
+        more = f" (and {len(warns) - 1} more like it)" if len(warns) > 1 else ""
+        return warns[0] + more
+
     def analyze(self):
         if self.busy:
             return
@@ -611,12 +619,12 @@ class App(ctk.CTk):
             prog(f"Loading {ref.name}...", 0.05)
             fa = self._load(ref, s.channel, s.rotate, warns)
             if not fa:
-                raise ValueError(f"No readable frames in {ref.name}")
+                raise ValueError(f"No readable frames in {ref.name}. {self._why(warns)}")
             if cmp:
                 prog(f"Loading {cmp.name}...", 0.15)
                 fb = self._load(cmp, fa[0].channel, s.rotate, warns)
                 if not fb:
-                    raise ValueError(f"No readable frames in {cmp.name}")
+                    raise ValueError(f"No readable frames in {cmp.name}. {self._why(warns)}")
                 c = P.compare(fa, fb, s, ref.name, cmp.name, prog)
             else:
                 if len(fa) < 2:
