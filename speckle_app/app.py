@@ -11,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+import csv
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -109,11 +110,12 @@ class ScanRow(ctk.CTkFrame):
         when = time.strftime("%H:%M", time.localtime(path.stat().st_mtime))
         badge, color = ("✓ done", OK) if complete else ("⚠ partial", WARN)
         if external:
-            badge, color = ("image", MUTED) if path.is_file() else ("folder", MUTED)
+            badge, color = ("image", MUTED) if path.is_file() else \
+                ("images", MUTED) if isinstance(path, P.FileSet) else ("folder", MUTED)
         info = ctk.CTkFrame(self, fg_color="transparent")
         info.grid(row=1, column=0, sticky="w", padx=(12, 4), pady=(0, 8))
         single = app.single
-        count = "1 image" if path.is_file() else f"{n} frame{'s' * (n != 1)}"
+        count = "1 image" if path.is_file() else f"{n} image{'s' * (n != 1)}"
         ctk.CTkLabel(info, text=f"{count} · {when}  ",
                      font=font(11), text_color=MUTED).pack(side="left")
         ctk.CTkLabel(info, text=badge, font=font(11), text_color=color).pack(side="left")
@@ -158,6 +160,7 @@ class App(ctk.CTk):
         self._pan = None
         self._eval_job = None
         self._lims = None
+        self.frame_idx = 0
         self.capture = Capture(self.settings["capture"], self.settings["incoming"],
                                status=lambda s: self._ui(self.set_status, s))
 
@@ -172,6 +175,8 @@ class App(ctk.CTk):
 
         self.bind("<Return>", lambda e: self.analyze())
         self.bind("<F5>", lambda e: self.refresh_scans())
+        self.bind("<Left>", lambda e: self._arrow(e, -1))
+        self.bind("<Right>", lambda e: self._arrow(e, 1))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(50, self._pump)
         self.after(2000, self._watch)
@@ -248,6 +253,24 @@ class App(ctk.CTk):
         self.hint_lbl = ctk.CTkLabel(sb, text="", font=font(11), text_color=MUTED,
                                      justify="left")
         self.hint_lbl.pack(anchor="w", padx=20, pady=(6, 0))
+        self.nav_box = ctk.CTkFrame(sb, fg_color="transparent", height=1)
+        self.nav_box.pack(fill="x", padx=18)
+        self.nav = ctk.CTkFrame(self.nav_box, fg_color=CARD, corner_radius=10)
+        self.nav.columnconfigure(1, weight=1)
+        ctk.CTkButton(self.nav, text="◀", width=34, height=30, fg_color=CARD_HI,
+                      hover_color=BORDER, command=lambda: self.step_frame(-1)).grid(
+            row=0, column=0, padx=(6, 4), pady=(6, 2))
+        self.nav_lbl = ctk.CTkLabel(self.nav, text="", font=font(12, "bold"))
+        self.nav_lbl.grid(row=0, column=1, sticky="ew")
+        ctk.CTkButton(self.nav, text="▶", width=34, height=30, fg_color=CARD_HI,
+                      hover_color=BORDER, command=lambda: self.step_frame(1)).grid(
+            row=0, column=2, padx=(4, 6), pady=(6, 2))
+        self.nav_file = ctk.CTkLabel(self.nav, text="", font=font(11), text_color=MUTED)
+        self.nav_file.grid(row=1, column=0, columnspan=3)
+        self.batch_btn = ctk.CTkButton(self.nav, text="Analyze all images", height=30,
+                                       fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                                       command=self.analyze_all)
+        self.batch_btn.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 6))
         self.auto_var = ctk.BooleanVar(value=a["auto"])
         self.auto_sw = ctk.CTkSwitch(sb, text="", variable=self.auto_var,
                                      progress_color=ACCENT, font=font(12))
@@ -451,6 +474,7 @@ class App(ctk.CTk):
     def set_busy(self, busy):
         self.busy = busy
         st = "disabled" if busy else "normal"
+        self.batch_btn.configure(state=st)
         self.scan_btn.configure(state=st)
         self.analyze_btn.configure(state=st)
         self.retry_btn.configure(state="normal" if (self.capture.pending and not busy)
@@ -490,9 +514,10 @@ class App(ctk.CTk):
                 n = len(P.list_frames(d))
             except OSError:
                 continue
-            ScanRow(self.scan_list, self, d, n, (d / "done.txt").exists(), ext).pack(
-                fill="x", pady=3, padx=2)
+            done = isinstance(d, Path) and d.is_dir() and (d / "done.txt").exists()
+            ScanRow(self.scan_list, self, d, n, done, ext).pack(fill="x", pady=3, padx=2)
         self._pair_labels()
+        self._update_nav()
 
     @property
     def single(self) -> bool:
@@ -514,7 +539,7 @@ class App(ctk.CTk):
         self.method_btn.configure(state="disabled" if single else "normal")
         self.kthr_title.configure(text="K below surroundings" if single else "Contrast change")
         self.hint_lbl.configure(text=(
-            "Press USE on one image or scan. For a folder,\nonly its first frame is analysed."
+            "Press USE on an image, folder or image group.\nStep with ◀ ▶ or analyse them all."
             if single else "No CMP picked → frame 1 of REF is compared\nwith its other frames."))
         self.auto_sw.configure(text="Auto-analyse every new scan" if single
                                else "Auto-compare new scans with REF")
@@ -536,6 +561,8 @@ class App(ctk.CTk):
 
     def pick(self, path, role):
         if role == "ref":
+            if path != self.ref:
+                self.frame_idx = 0
             self.ref = path
             if self.cmp == path:
                 self.cmp = None
@@ -546,12 +573,15 @@ class App(ctk.CTk):
         self.refresh_scans()
 
     def open_image(self):
-        f = filedialog.askopenfilename(
-            title="One speckle image",
-            filetypes=[("Speckle images", "*.dng *.DNG *.png *.tif *.tiff *.jpg *.jpeg *.bmp"),
+        fs = filedialog.askopenfilenames(
+            title="Speckle image(s) - Ctrl/Shift-click to pick several",
+            filetypes=[("Speckle images", "*.dng *.DNG *.png *.PNG *.tif *.tiff *.TIF "
+                                          "*.jpg *.jpeg *.JPG *.bmp"),
                        ("All files", "*")])
-        if f:
-            p = Path(f)
+        if fs:
+            files = tuple(sorted(Path(f) for f in fs))
+            p = files[0] if len(files) == 1 else P.FileSet(files)
+            self.frame_idx = 0
             if p not in self.extra_dirs:
                 self.extra_dirs.append(p)
             self.ref = p
@@ -559,14 +589,50 @@ class App(ctk.CTk):
                 self.cmp = None
             self.refresh_scans()
 
+    def _item_files(self):
+        if self.ref is None:
+            return []
+        try:
+            return P.list_frames(self.ref)
+        except OSError:
+            return []
+
+    def _update_nav(self):
+        files = self._item_files() if self.single else []
+        if len(files) > 1:
+            self.frame_idx = min(self.frame_idx, len(files) - 1)
+            self.nav_lbl.configure(text=f"Image {self.frame_idx + 1} / {len(files)}")
+            self.nav_file.configure(text=files[self.frame_idx].name)
+            if not self.nav.winfo_ismapped():
+                self.nav.pack(fill="x", pady=(8, 0))
+        else:
+            self.nav.pack_forget()
+
+    def step_frame(self, d):
+        files = self._item_files()
+        if len(files) < 2:
+            return
+        self.show_frame((self.frame_idx + d) % len(files))
+
+    def show_frame(self, i):
+        self.frame_idx = i
+        self._update_nav()
+        if not self.busy:
+            self.analyze()
+
+    def _arrow(self, e, d):
+        if self.single and "entry" not in str(e.widget).lower():
+            self.step_frame(d)
+
     def open_folder(self):
         d = filedialog.askdirectory(title="Folder with speckle frames (DNG/PNG/TIFF/JPG)")
         if d:
             p = Path(d)
             if p not in self.extra_dirs:
                 self.extra_dirs.append(p)
-            if not self.ref:
+            if not self.ref or self.single:
                 self.ref = p
+                self.frame_idx = 0
             self.refresh_scans()
 
     def _watch(self):
@@ -593,6 +659,7 @@ class App(ctk.CTk):
         if self.single:
             if not self.busy:
                 self.ref = d
+                self.frame_idx = 0
                 self.refresh_scans()
                 self.analyze()
             return
@@ -690,21 +757,32 @@ class App(ctk.CTk):
             return
         s = self._analysis_settings()
         ref, cmp, single = self.ref, self.cmp, self.single
+        if single:
+            files = self._item_files()
+            if not files:
+                self.set_status(f"No images in {ref.name}", "bad")
+                return
+            idx = min(self.frame_idx, len(files) - 1)
 
         def work():
             warns: list[str] = []
 
             def prog(msg, f):
                 self._ui(self.set_progress, msg, f)
+            if single:
+                f = files[idx]
+                prog(f"Loading {f.name}...", 0.05)
+                try:
+                    frame = P.load_frame(f, s.channel, s.rotate)
+                except Exception as e:  # noqa: BLE001
+                    raise ValueError(f"Cannot read {f.name}: {e}") from e
+                label = f.name if len(files) == 1 else f"{f.name} ({idx + 1}/{len(files)})"
+                return P.analyze_single(frame, s, label, prog)
             prog(f"Loading {ref.name}...", 0.05)
             fa = self._load(ref, s.channel, s.rotate, warns)
             if not fa:
                 raise ValueError(f"No readable frames in {ref.name}. {self._why(warns)}")
-            if single:
-                label = ref.name if ref.is_file() or len(fa) == 1 else \
-                    f"{ref.name} · frame 1 of {len(fa)}"
-                c = P.analyze_single(fa[0], s, label, prog)
-            elif cmp:
+            if cmp:
                 prog(f"Loading {cmp.name}...", 0.15)
                 fb = self._load(cmp, fa[0].channel, s.rotate, warns)
                 if not fb:
@@ -718,6 +796,49 @@ class App(ctk.CTk):
             c.warnings = warns + c.warnings
             return c
         self.run_bg(work, self._analysis_done)
+
+    def analyze_all(self):
+        """Analyse every image of the selected folder / image group on its own."""
+        files = self._item_files()
+        if self.busy or not files:
+            return
+        s = self._analysis_settings()
+        thr, area = self.kthr_var.get() / 100, self.area_var.get()
+        name = self.ref.name
+
+        def work():
+            rows = []
+            for i, f in enumerate(files):
+                self._ui(self.set_progress, f"Analysing {f.name} ({i + 1}/{len(files)})...",
+                         (i + 1) / len(files))
+                try:
+                    c = P.analyze_single(P.load_frame(f, s.channel, s.rotate), s, f.name)
+                    v = P.evaluate(c, "contrast", thr, 0.5, area)
+                    rows.append(dict(index=i, image=f.name, flow=v.changed,
+                                     flow_area_pct=round(v.changed_pct, 2),
+                                     still_K=round(v.mean_k_a, 4),
+                                     flow_K=round(v.mean_k_b, 4) if v.changed_pct else None,
+                                     saturation_pct=round(c.sat_a * 100, 3), error=""))
+                except Exception as e:  # noqa: BLE001 - keep going, report per image
+                    rows.append(dict(index=i, image=f.name, flow=None, flow_area_pct=None,
+                                     still_K=None, flow_K=None, saturation_pct=None,
+                                     error=str(e)))
+            safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)
+            out = ROOT / "results" / f"{safe}_batch_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with open(out, "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+                w.writeheader()
+                w.writerows(rows)
+            return rows, out
+
+        def done(res):
+            rows, out = res
+            BatchWindow(self, name, rows, out, thr * 100)
+            n_flow = sum(1 for r in rows if r["flow"])
+            self.set_status(f"Analysed {len(rows)} images · flow in {n_flow} · saved {out.name}",
+                            "ok")
+        self.run_bg(work, done)
 
     def _analysis_done(self, c: P.Comparison):
         old = self.comp
@@ -1150,6 +1271,57 @@ def save_settings(s):
         SETTINGS_FILE.write_text(json.dumps(s, indent=2))
     except OSError as e:
         print(f"Could not save settings: {e}")
+
+
+class BatchWindow(ctk.CTkToplevel):
+    """Results table of 'Analyze all images'. Click a row to open that image."""
+    COLS = [("#", 40), ("Image", 210), ("Verdict", 130), ("Flow area", 90),
+            ("Still K", 80), ("Flow K", 80), ("", 70)]
+
+    def __init__(self, app: App, name, rows, csv_path, thr):
+        super().__init__(app, fg_color=PANEL)
+        self.title(f"Batch · {name}")
+        self.geometry("780x620")
+        self.transient(app)
+        ok_rows = [r for r in rows if r["error"] == ""]
+        n_flow = sum(1 for r in ok_rows if r["flow"])
+        mean_area = (sum(r["flow_area_pct"] for r in ok_rows) / len(ok_rows)) if ok_rows else 0
+        ctk.CTkLabel(self, text=name, font=font(18, "bold")).pack(anchor="w", padx=18, pady=(16, 0))
+        ctk.CTkLabel(self, text=f"Flow detected in {n_flow} / {len(rows)} images  ·  mean flow "
+                                f"area {mean_area:.1f}%  ·  threshold K {thr:.0f}% below "
+                                f"surroundings", font=font(12), text_color=MUTED).pack(
+            anchor="w", padx=18)
+        ctk.CTkLabel(self, text=f"Saved: {csv_path}", font=font(11), text_color=MUTED).pack(
+            anchor="w", padx=18, pady=(0, 8))
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=22)
+        for i, (t, w) in enumerate(self.COLS):
+            ctk.CTkLabel(head, text=t.upper(), width=w, anchor="w", font=font(10, "bold"),
+                         text_color=MUTED).grid(row=0, column=i)
+        body = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=12)
+        body.pack(fill="both", expand=True, padx=18, pady=(4, 18))
+        top = max((r["flow_area_pct"] or 0 for r in ok_rows), default=0)
+        for r in rows:
+            line = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+            line.pack(fill="x", pady=2)
+            if r["error"]:
+                vals = [str(r["index"] + 1), r["image"], ("error", BAD), r["error"][:40], "", ""]
+            else:
+                hot = r["flow"] and r["flow_area_pct"] == top
+                verdict = ("FLOW" + ("  ▲ max" if hot else ""), BAD) if r["flow"] else ("no flow", OK)
+                vals = [str(r["index"] + 1), r["image"], verdict, f"{r['flow_area_pct']:.1f} %",
+                        f"{r['still_K']:.3f}",
+                        f"{r['flow_K']:.3f}" if r["flow_K"] is not None else "—"]
+            for i, v in enumerate(vals):
+                text, color = v if isinstance(v, tuple) else (v, TEXT)
+                ctk.CTkLabel(line, text=text, width=self.COLS[i][1], anchor="w",
+                             font=font(12, "bold" if i == 2 else "normal"),
+                             text_color=color).grid(row=0, column=i, padx=(4 if i == 0 else 0, 0),
+                                                    pady=4)
+            ctk.CTkButton(line, text="Open", width=60, height=24, fg_color=CARD_HI,
+                          hover_color=BORDER, font=font(11),
+                          command=lambda i=r["index"]: app.show_frame(i)).grid(
+                row=0, column=len(vals), padx=6)
 
 
 class SettingsDialog(ctk.CTkToplevel):

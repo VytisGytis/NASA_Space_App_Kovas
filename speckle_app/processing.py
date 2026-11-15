@@ -34,7 +34,31 @@ class Frame:
     channel: str
 
 
-def list_frames(folder: Path) -> list[Path]:
+@dataclass(frozen=True)
+class FileSet:
+    """Several image files picked together (multi-select), handled like a folder."""
+    files: tuple[Path, ...]
+
+    @property
+    def name(self) -> str:
+        return f"{len(self.files)} images · {self.files[0].parent.name}"
+
+    def exists(self) -> bool:
+        return any(f.exists() for f in self.files)
+
+    def is_file(self) -> bool:
+        return False
+
+    def stat(self):
+        return self.files[0].stat()
+
+    def __str__(self):
+        return "|".join(map(str, self.files))
+
+
+def list_frames(folder) -> list[Path]:
+    if isinstance(folder, FileSet):
+        return [f for f in folder.files if f.exists()]
     folder = Path(folder)
     if folder.is_file():                      # a single image picked directly
         return [folder] if folder.suffix.lower() in RAW_EXT | IMG_EXT else []
